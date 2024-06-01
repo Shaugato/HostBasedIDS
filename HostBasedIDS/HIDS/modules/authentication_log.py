@@ -1,60 +1,70 @@
+import os
 import re
-from collections import defaultdict
+import logging
+from queue import Queue
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from collections import defaultdict
 from .abstract_module import AbstractModule
 
-class AuthenticationLogMonitor(AbstractModule):
-    def __init__(self, logger: Queue):
+class AuthenticationLog(AbstractModule):
+    def __init__(self, logger: Queue, log_file_path: str = "/var/log/auth.log"):
         super().__init__(logger)
-        self.auth_log_path = "/var/log/auth.log"
+        self.log_file_path = log_file_path
         self.failed_login_attempts = defaultdict(int)
         self.observer = Observer()
-        self.log("AuthenticationLog module loaded", "INFO")
 
-    def run(self):
-        event_handler = self.LogFileChangeHandler(self)
-        self.observer.schedule(event_handler, os.path.dirname(self.auth_log_path), recursive=False)
+    def _run(self):
+        event_handler = self.LogFileHandler(self)
+        self.observer.schedule(event_handler, os.path.dirname(self.log_file_path), recursive=False)
         self.observer.start()
+        self.log("Authentication log monitoring started", logging.INFO)
         try:
-            while True:
-                time.sleep(1)
-                self.check_failed_attempts()
-        except KeyboardInterrupt:
+            while not self.stop_event.is_set():
+                self.stop_event.wait(1)
+        finally:
             self.observer.stop()
-        self.observer.join()
+            self.observer.join()
 
-    class LogFileChangeHandler(FileSystemEventHandler):
+    class LogFileHandler(FileSystemEventHandler):
         def __init__(self, monitor):
             self.monitor = monitor
 
         def on_modified(self, event):
-            if event.src_path == self.monitor.auth_log_path:
-                self.monitor.monitor_authentication()
+            if event.src_path == self.monitor.log_file_path:
+                self.monitor.process_log()
 
-    def monitor_authentication(self):
-        last_line = self.read_last_line(self.auth_log_path)
-        if last_line:
-            self.parse_log_line(last_line)
+    def process_log(self):
+        with open(self.log_file_path, 'r') as file:
+            lines = file.readlines()
+            last_line = lines[-1].strip() if lines else ""
+            self.monitor_authentication(last_line)
 
-    def read_last_line(self, file_path):
-        with open(file_path, 'r') as file:
-            return file.readlines()[-1]
-
-    def parse_log_line(self, line):
-        regex = re.compile(r"(\w+\s+\d+\s+\d+:\d+:\d+) (\w+) (\w+)\[\d+\]: (.+)")
-        match = regex.match(line)
+    def monitor_authentication(self, log_entry: str):
+        pattern = r"(\w+\s+\d+\s+\d+:\d+:\d+)\s+(\S+)\s+(\S+)\[\d+\]:\s+(.*)"
+        match = re.match(pattern, log_entry)
         if match:
-            date_time, host, process, message = match.groups()
-            if "fatal:" in message or "Invalid user" in message or "authentication failure" in message:
-                self.failed_login_attempts[host] += 1
-            self.log_alert(f"DateTime: {date_time}, Host: {host}, Process: {process}, Message: {message}")
+            timestamp, host, process, message = match.groups()
+            if "Failed password" in message or "Invalid user" in message:
+                ip_address = self.extract_ip(message)
+                self.failed_login_attempts[ip_address] += 1
+                self.log(f"Failed login attempt from {ip_address}. Count: {self.failed_login_attempts[ip_address]}", logging.WARNING)
+                self.check_failed_attempts(ip_address)
 
-    def check_failed_attempts(self):
-        for host, count in self.failed_login_attempts.items():
-            if count >= 5:
-                self.log_alert(f"Too many failed login attempts from host: {host}. Taking action.")
-                self.failed_login_attempts[host] = 0
+    def extract_ip(self, message: str) -> str:
+        pattern = r"(\d+\.\d+\.\d+\.\d+)"
+        match = re.search(pattern, message)
+        return match.group(1) if match else "Unknown IP"
 
-    def log_alert(self, message):
-        self.log(message, "WARNING")
+    def check_failed_attempts(self, ip_address: str):
+        if self.failed_login_attempts[ip_address] >= 5:  # Threshold for too many failed attempts
+            self.log(f"Too many failed login attempts from {ip_address}. Blocking IP.", logging.CRITICAL)
+            self.block_ip(ip_address)
+            self.failed_login_attempts[ip_address] = 0
+
+    def block_ip(self, ip_address: str):
+        try:
+            os.system(f"sudo iptables -A INPUT -s {ip_address} -j DROP")
+            self.log(f"Blocked IP {ip_address} due to excessive failed login attempts.", logging.INFO)
+        except Exception as e:
+            self.log(f"Failed to block IP {ip_address}: {e}", logging.ERROR)

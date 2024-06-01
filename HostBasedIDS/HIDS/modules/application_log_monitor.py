@@ -1,5 +1,7 @@
 import os
 import re
+from queue import Queue
+import logging
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -12,66 +14,73 @@ class ApplicationLogMonitor(AbstractModule):
         super().__init__(logger)
         self.log_file_path = log_file_path
         self.observer = Observer()
-        self.log("Application log monitoring started", "INFO")
 
-    def run(self):
-        event_handler = self.LogFileChangeHandler(self)
+    def _run(self):
+        event_handler = self.LogFileHandler(self)
         self.observer.schedule(event_handler, os.path.dirname(self.log_file_path), recursive=False)
         self.observer.start()
+        self.log("Application log monitoring started", logging.INFO)
         try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
+            while not self.stop_event.is_set():
+                self.stop_event.wait(1)
+        finally:
             self.observer.stop()
-        self.observer.join()
+            self.observer.join()
 
-    class LogFileChangeHandler(FileSystemEventHandler):
+    class LogFileHandler(FileSystemEventHandler):
         def __init__(self, monitor):
             self.monitor = monitor
 
         def on_modified(self, event):
             if event.src_path == self.monitor.log_file_path:
-                self.monitor.handle_log_file_change()
+                self.monitor.process_log()
 
-    def handle_log_file_change(self):
-        try:
-            new_log_entry = self.read_new_log_entries()
-            if self.is_error(new_log_entry):
-                self.log("Alert: Error detected in the application log.", "WARNING")
-                self.forward_log_to_reports(new_log_entry)
-                self.kill_associated_processes(new_log_entry)
-        except Exception as e:
-            self.log(f"WARNING!: Error: {str(e)}", "ERROR")
-
-    def read_new_log_entries(self):
+    def process_log(self):
         with open(self.log_file_path, 'r') as file:
-            log_entries = file.readlines()
-        return log_entries[-1] if log_entries else None
+            lines = file.readlines()
+            last_line = lines[-1].strip() if lines else ""
+            if self.is_error(last_line):
+                self.log(f"Alert: Error detected in application log: {last_line}", logging.WARNING)
+                self.forward_log_to_reports(last_line)
+                self.kill_associated_processes(last_line)
 
-    def is_error(self, log_entry):
-        return log_entry and ("error" in log_entry.lower() or "exception" in log_entry.lower())
+    def is_error(self, log_entry: str) -> bool:
+        return "error" in log_entry.lower()
 
-    def forward_log_to_reports(self, log_entry):
-        self.send_email_to_sysadmin("Suspicious Activity Detected in the application log", f"Log File: {self.log_file_path}\nLog Entry: {log_entry}")
+    def forward_log_to_reports(self, log_entry: str):
+        self.send_email_to_sysadmin("Suspicious Activity Detected in Application Log", f"Log Entry: {log_entry}")
 
-    def send_email_to_sysadmin(self, subject, body):
-        msg = MIMEMultipart()
-        msg['From'] = 'sysadmin@example.com'
-        msg['To'] = 'moderator@hids.com'
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
-        server = smtplib.SMTP('smtp.example.com', 587)
-        server.starttls()
-        server.login('sysadmin@example.com', 'password')
-        server.sendmail('sysadmin@example.com', 'moderator@hids.com', msg.as_string())
-        server.quit()
+    def send_email_to_sysadmin(self, subject: str, body: str):
+        try:
+            sender_email = "your-email@example.com"
+            receiver_email = "sysadmin@example.com"
+            smtp_server = "smtp.example.com"
+            smtp_port = 587  # Usually 587 for TLS, 465 for SSL
+            smtp_user = "your-email@example.com"
+            smtp_password = "your-email-password"
 
-    def kill_associated_processes(self, log_entry):
-        match = re.search(r"ProcessID=(\d+)", log_entry)
-        if match:
+            message = MIMEMultipart()
+            message["From"] = sender_email
+            message["To"] = receiver_email
+            message["Subject"] = subject
+
+            message.attach(MIMEText(body, "plain"))
+
+            with smtplib.SMTP(smtp_server, smtp_port) as server:
+                server.starttls()
+                server.login(smtp_user, smtp_password)
+                server.sendmail(sender_email, receiver_email, message.as_string())
+
+            self.log(f"Email sent to sysadmin: {subject} - {body}", logging.INFO)
+        except Exception as e:
+            self.log(f"Failed to send email: {e}", logging.ERROR)
+
+    def kill_associated_processes(self, log_entry: str):
+        match = re.search(r'ProcessID=(\d+)', log_entry)
+        if (match):
             process_id = int(match.group(1))
             try:
                 os.kill(process_id, 9)
-                self.log(f"Killed Process ID {process_id} that was associated with the error.", "INFO")
+                self.log(f"Killed process with ID {process_id} associated with error log.", logging.INFO)
             except Exception as e:
-                self.log(f"WARNING!: Error: {str(e)}", "ERROR")
+                self.log(f"Failed to kill process {process_id}: {e}", logging.ERROR)

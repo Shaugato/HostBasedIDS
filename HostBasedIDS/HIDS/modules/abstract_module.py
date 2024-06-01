@@ -1,16 +1,23 @@
-from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor
+import logging
 from queue import Queue
-from typing import Type
-from logging import Logger
+from threading import Event
 
-class AbstractModule(ABC):
+class AbstractModule:
     def __init__(self, logger: Queue):
         self.logger = logger
+        self.stop_event = Event()
+        self.executor = ThreadPoolExecutor(max_workers=1)
 
-    @abstractmethod
     def run(self):
-        pass
+        self.executor.submit(self._run)
 
-    def log(self, message: str, level: str = "INFO"):
-        self.logger.put({"message": message, "level": level, "source": self.__class__.__name__})
+    def _run(self):
+        raise NotImplementedError("Subclasses must implement this method")
 
+    def log(self, message: str, level=logging.INFO):
+        self.logger.put((message, level))
+
+    def stop(self):
+        self.stop_event.set()
+        self.executor.shutdown(wait=True)
