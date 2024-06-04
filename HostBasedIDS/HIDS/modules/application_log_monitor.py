@@ -8,6 +8,7 @@ from email.mime.multipart import MIMEMultipart
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from .abstract_module import AbstractModule
+import psutil
 
 class ApplicationLogMonitor(AbstractModule):
     def __init__(self, logger: Queue, log_file_path: str):
@@ -40,12 +41,19 @@ class ApplicationLogMonitor(AbstractModule):
             lines = file.readlines()
             last_line = lines[-1].strip() if lines else ""
             if self.is_error(last_line):
-                self.log(f"Alert: Error detected in application log: {last_line}", logging.WARNING)
+                self.log(f"Alert: Error detected in the application log: {last_line}", logging.ERROR)
                 self.forward_log_to_reports(last_line)
                 self.kill_associated_processes(last_line)
+            elif self.is_warning(last_line):
+                self.log(f"Log entry: {last_line}", logging.WARNING)
+            else:
+                self.log(f"Log entry: {last_line}", logging.INFO)
 
     def is_error(self, log_entry: str) -> bool:
         return "error" in log_entry.lower()
+
+    def is_warning(self, log_entry: str) -> bool:
+        return "warning" in log_entry.lower()
 
     def forward_log_to_reports(self, log_entry: str):
         self.send_email_to_sysadmin("Suspicious Activity Detected in Application Log", f"Log Entry: {log_entry}")
@@ -77,10 +85,27 @@ class ApplicationLogMonitor(AbstractModule):
 
     def kill_associated_processes(self, log_entry: str):
         match = re.search(r'ProcessID=(\d+)', log_entry)
-        if (match):
+        if match:
             process_id = int(match.group(1))
             try:
-                os.kill(process_id, 9)
+                process = psutil.Process(process_id)
+                process.terminate()
                 self.log(f"Killed process with ID {process_id} associated with error log.", logging.INFO)
             except Exception as e:
                 self.log(f"Failed to kill process {process_id}: {e}", logging.ERROR)
+
+    def log_file_changed(self, log_file_path):
+        new_log_entry = self.read_new_log_entries(log_file_path)
+        if self.is_error(new_log_entry):
+            self.log("Alert: Error detected in the application log.", logging.ERROR)
+            self.forward_log_to_reports(new_log_entry)
+            self.kill_associated_processes(new_log_entry)
+        elif self.is_warning(new_log_entry):
+            self.log(f"Log entry: {new_log_entry}", logging.WARNING)
+        else:
+            self.log(f"Log entry: {new_log_entry}", logging.INFO)
+
+    def read_new_log_entries(self, log_file_path):
+        with open(log_file_path, 'r') as file:
+            lines = file.readlines()
+            return lines[-1].strip() if lines else ""

@@ -15,8 +15,9 @@ class AbstractModule:
     def _run(self):
         raise NotImplementedError("Subclasses must implement this method")
 
-    def log(self, message: str, level=logging.INFO):
-        self.logger.put((message, level))
+    def log(self, message: str, level: int):
+        log_entry = {'message': message, 'level': level}
+        self.logger.put(log_entry)
 
     def stop(self):
         self.stop_event.set()

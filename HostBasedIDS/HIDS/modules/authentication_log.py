@@ -56,11 +56,13 @@ class AuthenticationLog(AbstractModule):
         match = re.search(pattern, message)
         return match.group(1) if match else "Unknown IP"
 
-    def check_failed_attempts(self, ip_address: str):
-        if self.failed_login_attempts[ip_address] >= 5:  # Threshold for too many failed attempts
-            self.log(f"Too many failed login attempts from {ip_address}. Blocking IP.", logging.CRITICAL)
-            self.block_ip(ip_address)
-            self.failed_login_attempts[ip_address] = 0
+    def check_failed_attempts(self, ip_address=None):
+        for ip, count in self.failed_login_attempts.items():
+            if count >= 5:
+                self.log_alert(f"Too many failed login attempts from IP: {ip}. Taking action.")
+                if ip_address and ip == ip_address:
+                    self.failed_login_attempts[ip] = 0
+                    self.block_ip(ip)
 
     def block_ip(self, ip_address: str):
         try:
@@ -68,3 +70,9 @@ class AuthenticationLog(AbstractModule):
             self.log(f"Blocked IP {ip_address} due to excessive failed login attempts.", logging.INFO)
         except Exception as e:
             self.log(f"Failed to block IP {ip_address}: {e}", logging.ERROR)
+
+    def log_alert(self, message):
+        self.log(message, logging.WARNING)
+    
+    def log_file_changed(self, log_file_path):
+        self.process_log()

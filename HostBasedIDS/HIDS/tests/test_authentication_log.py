@@ -1,52 +1,73 @@
 import unittest
 from queue import Queue
-from unittest.mock import patch, mock_open
+from unittest.mock import patch, mock_open, MagicMock
 from HIDS.modules.authentication_log import AuthenticationLog
 import logging
 
 class TestAuthenticationLog(unittest.TestCase):
     def setUp(self):
         self.logger = Queue()
-        self.auth_log = AuthenticationLog(self.logger)
+        self.monitor = AuthenticationLog(self.logger, "/var/log/auth.log")
 
-    @patch("builtins.open", new_callable=mock_open, read_data="Jan  1 12:00:00 localhost sshd[12345]: Failed password for invalid user from 192.168.0.1 port 22 ssh2\nJan  1 12:01:00 localhost sshd[12345]: Accepted password for user from 192.168.0.2 port 22 ssh2\n")
-    def test_monitor_authentication(self, mock_file):
-        test_line = "Jan  1 12:00:00 localhost sshd[12345]: Failed password for invalid user from 192.168.0.1 port 22 ssh2"
-        self.auth_log.monitor_authentication(test_line)
+    @patch("builtins.open", new_callable=mock_open, read_data="Jan 1 12:00:00 localhost sshd[12345]: Failed password for invalid user root from 192.168.1.1 port 22 ssh2\n")
+    def test_process_log(self, mock_file):
+        self.monitor.process_log()
         self.assertFalse(self.logger.empty())
         log_entry = self.logger.get()
         self.assertEqual(log_entry['level'], logging.WARNING)
-        self.assertIn("Failed password", log_entry['message'])
+        self.assertIn("Failed login attempt from 192.168.1.1. Count: 1", log_entry['message'])
 
-        test_line = "Jan  1 12:01:00 localhost sshd[12345]: Accepted password for user from 192.168.0.2 port 22 ssh2"
-        self.auth_log.monitor_authentication(test_line)
+    @patch("os.system")
+    def test_block_ip(self, mock_system):
+        self.monitor.block_ip("192.168.1.1")
         self.assertFalse(self.logger.empty())
         log_entry = self.logger.get()
         self.assertEqual(log_entry['level'], logging.INFO)
-        self.assertIn("Accepted password", log_entry['message'])
+        self.assertIn("Blocked IP 192.168.1.1 due to excessive failed login attempts", log_entry['message'])
+        mock_system.assert_called_with("sudo iptables -A INPUT -s 192.168.1.1 -j DROP")
+
+    def test_extract_ip(self):
+        message = "Failed password for invalid user root from 192.168.1.1 port 22 ssh2"
+        ip_address = self.monitor.extract_ip(message)
+        self.assertEqual(ip_address, "192.168.1.1")
 
     def test_check_failed_attempts(self):
-        self.auth_log.failed_login_attempts["192.168.0.1"] = 5
-        self.auth_log.check_failed_attempts()
-        self.assertFalse(self.logger.empty())
-        log_entry = self.logger.get()
-        self.assertIn("Too many failed login attempts", log_entry['message'])
+        self.monitor.failed_login_attempts["192.168.1.1"] = 5
+        with patch.object(self.monitor, 'log_alert') as mock_log_alert:
+            self.monitor.check_failed_attempts("192.168.1.1")
+            mock_log_alert.assert_called_once_with("Too many failed login attempts from IP: 192.168.1.1. Taking action.")
+            self.assertEqual(self.monitor.failed_login_attempts["192.168.1.1"], 0)
 
-    def test_log_alert(self):
-        self.auth_log.log_alert("Test Alert")
+    @patch("os.system")
+    def test_check_failed_attempts_block_ip(self, mock_system):
+        self.monitor.failed_login_attempts["192.168.1.1"] = 5
+        self.monitor.check_failed_attempts("192.168.1.1")
+        mock_system.assert_called_once_with("sudo iptables -A INPUT -s 192.168.1.1 -j DROP")
+
+    @patch("builtins.open", new_callable=mock_open, read_data="Jan 1 12:00:00 localhost sshd[12345]: Invalid user admin from 192.168.1.2\n")
+    def test_log_file_changed(self, mock_file):
+        self.monitor.log_file_changed("/var/log/auth.log")
         self.assertFalse(self.logger.empty())
         log_entry = self.logger.get()
         self.assertEqual(log_entry['level'], logging.WARNING)
-        self.assertIn("Test Alert", log_entry['message'])
+        self.assertIn("Failed login attempt from 192.168.1.2. Count: 1", log_entry['message'])
 
-    @patch("builtins.open", new_callable=mock_open, read_data="Jan  1 12:00:00 localhost sshd[12345]: Failed password for invalid user from 192.168.0.1 port 22 ssh2\n")
-    def test_on_changed(self, mock_file):
-        self.auth_log.on_changed(None, None)
-        self.assertFalse(self.logger.empty())
-        log_entry = self.logger.get()
-        self.assertEqual(log_entry['level'], logging.WARNING)
-        self.assertIn("Failed password", log_entry['message'])
+    @patch("os.system")
+    @patch("builtins.open", new_callable=mock_open, read_data="Jan 1 12:00:00 localhost sshd[12345]: Failed password for invalid user root from 192.168.1.1 port 22 ssh2\n")
+    def test_monitor_authentication(self, mock_file, mock_system):
+        for _ in range(5):
+            self.monitor.process_log()
+        
+        # Verify the warning about too many failed login attempts
+        found_alert = False
+        while not self.logger.empty():
+            log_entry = self.logger.get()
+            if log_entry['level'] == logging.WARNING and "Too many failed login attempts from IP: 192.168.1.1. Taking action." in log_entry['message']:
+                found_alert = True
+                break
+        
+        self.assertTrue(found_alert)
+        mock_system.assert_called_with("sudo iptables -A INPUT -s 192.168.1.1 -j DROP")
 
 if __name__ == '__main__':
     unittest.main()
-

@@ -3,7 +3,6 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from queue import Queue
-import threading
 import json
 import requests
 from .abstract_module import AbstractModule

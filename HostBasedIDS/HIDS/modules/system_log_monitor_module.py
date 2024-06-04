@@ -2,7 +2,7 @@ import os
 import logging
 from queue import Queue
 from .abstract_module import AbstractModule
-from .utils.synchronous_interval_scheduler import SynchronousIntervalScheduler
+from ..utils.synchronous_interval_scheduler import SynchronousIntervalScheduler
 import re
 from datetime import datetime
 
